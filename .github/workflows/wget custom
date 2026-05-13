@@ -1,0 +1,138 @@
+name: Wget Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: '🔗 Direct Link'
+        required: true
+        type: string
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Prepare wget branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git fetch origin
+
+          if git ls-remote --exit-code --heads origin wget; then
+            git checkout wget
+            git pull origin wget
+          else
+            git checkout --orphan wget
+
+            git rm -rf . || true
+
+            mkdir -p wget
+            touch README.md
+
+            git add .
+            git commit -m "[bot] Initialize wget branch"
+
+            git push --set-upstream origin wget
+          fi
+
+      - name: Download and Split
+        id: download
+        run: |
+          mkdir -p tmpwget
+          cd tmpwget
+
+          wget -q --show-progress \
+            --content-disposition \
+            --trust-server-names \
+            "${{ github.event.inputs.link }}"
+
+          FILE=$(ls -1 | head -n 1)
+
+          SAFE_NAME=$(echo "$FILE" | sed 's/^[[:space:]]*//' | tr ' ' '_')
+
+          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
+
+          mkdir -p ../wget
+
+          echo "Splitting into 95MB parts..."
+
+          split -b 95M "$FILE" "../wget/${SAFE_NAME}.part"
+
+          echo "Generated parts:"
+          ls -lh ../wget
+
+      - name: Generate README
+        run: |
+          rm -f README.md
+
+          echo "# 📥 Wget Download Links" > README.md
+          echo "" >> README.md
+          echo "Generated on: $(date)" >> README.md
+          echo "" >> README.md
+
+          for file in $(ls wget | sort); do
+            if [ -f "wget/$file" ]; then
+
+              encoded_filename=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$file")
+
+              url="https://github.com/${{ github.repository }}/raw/wget/wget/$encoded_filename"
+
+              echo "- [Download $file]($url)" >> README.md
+            fi
+          done
+
+          echo "" >> README.md
+          echo "## 🔧 Merge Files" >> README.md
+          echo "" >> README.md
+
+          echo '### Linux / macOS' >> README.md
+          echo '```bash' >> README.md
+          echo "cat ${SAFE_NAME}.part* > ${SAFE_NAME}" >> README.md
+          echo '```' >> README.md
+
+          echo "" >> README.md
+
+          echo '### Windows CMD' >> README.md
+          echo '```cmd' >> README.md
+          echo "copy /b ${SAFE_NAME}.partaa+${SAFE_NAME}.partab+${SAFE_NAME}.partac ${SAFE_NAME}" >> README.md
+          echo '```' >> README.md
+
+      - name: Push Files Individually
+        run: |
+          git config http.postBuffer 2147483648
+          git config core.compression 0
+
+          for file in wget/*; do
+
+            echo "Uploading $file"
+
+            git reset
+
+            git add "$file"
+
+            git commit -m "Add $(basename "$file")" || true
+
+            until git push origin wget; do
+              echo "Retrying push in 10 seconds..."
+              sleep 10
+            done
+
+          done
+
+          git add README.md
+
+          git commit -m "Update README" || true
+
+          git push origin wget
